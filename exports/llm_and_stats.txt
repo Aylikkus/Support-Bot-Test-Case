@@ -1,0 +1,1669 @@
+ ▐▛███▛█   Claude Code v2.1.286
+▝▜██████▀  Sonnet 5.5 · API Usage Billing
+ ▝▝   ▝▝   /mnt/HDD/Media/Code/msoc_test_case/promo-support_bot
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ /clear                                                                        
+
+❯ I need you to make proper LLM message handling through Ollama API, I added    
+  token in .env and .env.example files and moved them up with Telegram Bot      
+  token. Important rules: System prompt is described in file                    
+  resources/prompts/system-prompt.md, there are two tags that you need to       
+  change periodically: $DMY_TAG (preferably in Russian language, like '01       
+  Октября 2026' or 01.10.2026 if Russian text date is a hassle to make),        
+  $RULES_TAG should be loaded from resources/prompts/promo-rules.md . There are 
+  three types of replies that model can make based on prompt (it should output  
+  JSON): ok (model makes succesful answer, it should close the request          
+  automatically with a mark that is was not forwarded to operator), partial     
+  (model needs further details, implement with classic user|assistant history   
+  gathering through messages for this request), error (in that case it needs to 
+  be forwarded to operator with message "Здравствуйте! Ваше сообщение           
+  направлено оператору, подождите пожалуйста. Время работы операторов с 9:00 до 
+  18:00 в будние дни."). This is an example of request with Ollama:             
+  curl https://ollama.com/api/chat \                                            
+    -H "Authorization: Bearer $OLLAMA_API_KEY" \                                
+    -H "Content-Type: application/json" \                                       
+    -d '{                                                                       
+      "model": "gemma4:31b",                                                    
+      "messages": [                                                             
+        {                                                                       
+          "role": "user",                                                       
+          "content": "Скажи привет в одном предложении."                        
+        }                                                                       
+      ],                                                                        
+      "stream": false                                                           
+    }'                                                                          
+  {"model":"gemma4:31b","created_at":"2026-10-01T09:49:10.027810904Z","message" 
+  :{"role":"assistant","content":"Привет!"},"done":true,"done_reason":"stop","t 
+  otal_duration":241099982,"prompt_eval_count":21,"prompt_eval_cached_count":0, 
+  "eval_count":3}                                                               
+  . Don't test Ollama API itself in order to not consume too much tokens from   
+  my accout, I will test it manually                                            
+
+● I'll start by exploring the project structure.
+
+  Searched for 1 pattern, ran 6 shell commands (ctrl+o to expand)
+
+● Core LLM code is in place, and I'm now updating the tests to use a fake LLM
+  client, so the real Ollama API is never called.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Incoming text messages now go through Ollama and are handled by the model's
+  ok, partial or error answer. The full suite passes (51 tests). The tests use a
+  fake LLM client, so I never called the real Ollama API.
+
+  What happens to each message
+  - ok: the bot sends the model's msg and closes the request with
+    forwarded_to_operator = false. If Telegram delivery fails, the request stays
+    open instead of closing.
+  - partial: the bot sends the model's msg and keeps the request open. On the
+    next message, the request's earlier messages are sent to the model as a
+    user/assistant history. The history is capped at 20 messages and leaves out
+    operator messages. Earlier bot replies are replayed as
+    {"status":"partial","msg":...}.
+  - error: the request is marked forwarded (forwarded_to_operator = true,
+    forwarded_at set) and the user gets "Здравствуйте! Ваше сообщение направлено
+    оператору, подождите пожалуйста. Время работы операторов с 9:00 до 18:00 в
+    будние дни."
+  - Unusable output: invalid JSON, an unknown status, a missing or empty msg, or
+    a msg over 4096 characters all count as error. A markdown fence around the
+    JSON is accepted. The reply is sent as plain text with no parse_mode.
+  - Ollama failure: a timeout, a non-2xx response or a missing key is logged and
+    also counts as error, so the request goes to an operator.
+  - Already forwarded requests: later messages are stored but get no automatic
+    reply and no LLM call.
+  - Photos and documents: forwarded to an operator without asking the model,
+    since it only sees text.
+
+  The prompt
+  $DMY_TAG is filled with the current date in Moscow time, in Russian, for
+  example 01 октября 2026. $RULES_TAG is filled from promo-rules.md. Both are
+  built on every call.
+
+  Code layout
+  - Provider isolation: the app depends on a LlmClient interface in
+    app/Services/Llm/, and only OllamaClient knows about Ollama. It posts to
+    {url}/api/chat with stream: false and format: "json".
+  - Answer handling: SupportAnswer::parse() validates the model output, and
+    SupportAssistant builds the history and calls the client.
+  - Handler: IncomingMessageHandler was rewired to use them, and
+    SupportRequestService gained forwardToOperator().
+  - Config: config/services.php has an ollama block (key, URL, model, timeout).
+    I added optional OLLAMA_MODEL, OLLAMA_URL and OLLAMA_TIMEOUT, defaulting to
+    https://ollama.com, gemma4:31b and 60 seconds. OLLAMA_MODEL is in
+    .env.example as a comment.
+  - Tests: I updated IncomingMessageHandlerTest.php, since the old fixed reply
+    "Ваше обращение учтено" no longer exists, and added OllamaClientTest.php.
+
+  Things to know
+  - Prompt typo: the JSON examples in system-prompt.md are missing a comma after
+    "status": "ok". The model may copy that into its output, which would be
+    invalid JSON and get forwarded to an operator. I left your file alone; it's
+    worth adding the commas.
+  - Blocking calls: the model call runs inside the telegram:poll loop, so a slow
+    answer delays other users' updates by up to the 60-second timeout.
+
+✻ Baked for 1m 50s · done 13:00
+
+❯ Works great, typos in prompt fixed. I need you to make separate popup (with   
+  button) called "Статистика". In this popup you should display the following   
+  things: сколько вопросов бот закрыл сам (count of forwarded_to_operator=false 
+  AND status='closed'), сколько передано операторам (total count of             
+  forwarded_to_operator=true), среднее время ответа оператора                   
+  (average(closed_at - forwarded_at) preferrably in format like: %H часов %M    
+  минут). Button itself place in left bottom corner                             
+  ⎿  You've hit your session limit · resets 3:20pm (Europe/Moscow)
+
+● Usage limit reached · continuing automatically at 3:20pm · esc to 
+  cancel
+
+✻ Baked for 1s · done 13:13
+
+❯ /model                                                                        
+  ⎿  Set model to Sonnet 5 and saved as your default for new sessions
+
+❯ Works great, typos in prompt fixed. I need you to make separate popup (with   
+  button) called "Статистика". In this popup you should display the following   
+  things: сколько вопросов бот закрыл сам (count of forwarded_to_operator=false 
+  AND status='closed'), сколько передано операторам (total count of             
+  forwarded_to_operator=true), среднее время ответа оператора                   
+  (average(closed_at - forwarded_at) preferrably in format like: %H часов %M    
+  минут). Button itself place in left bottom corner                             
+
+● Usage limit reached again · continuing automatically at 3:20pm · esc 
+  to cancel
+  ⎿  You've hit your session limit · resets 3:20pm (Europe/Moscow)
+
+✻ Churned for 0s · done 13:15
+
+● Automatic continue cancelled · /rate-limit-options to re-arm
+
+❯ /model                                                                        
+  ⎿  Set model to gpt-5.3-codex and saved as your default for new sessions
+
+❯ Works great, typos in prompt fixed. I need you to make separate popup (with   
+  button) called "Статистика". In this popup you should display the following   
+  things: сколько вопросов бот закрыл сам (count of forwarded_to_operator=false 
+  AND status='closed'), сколько передано операторам (total count of             
+  forwarded_to_operator=true), среднее время ответа оператора                   
+  (average(closed_at - forwarded_at) preferrably in format like: %H часов %M    
+  минут). Button itself place in left bottom corner                             
+  ⎿  1 skill available
+
+  Thought for 1s (ctrl+o to expand)
+
+● Entered plan mode
+  Claude is now exploring and designing an implementation approach.
+
+  Thought for 1s (ctrl+o to expand)
+
+● 2 Explore agents finished (ctrl+o to expand)
+   ├ Find UI modal patterns · 0 tool uses
+   │ ⎿  Done
+   └ Find stats/query patterns · 0 tool uses
+     ⎿  Done
+
+  Thought for 1s (ctrl+o to expand)
+
+● 2 background agents launched (↓ to manage)
+   ├ UI modal patterns
+   └ Backend stats patterns
+
+  Thought for 1s (ctrl+o to expand)
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s, ran 1 shell command (ctrl+o to expand)
+
+● Stop Task
+  ⎿  UI modal patterns · stopped
+
+● Agent "UI modal patterns" was stopped by Claude
+
+  Thought for 1s (ctrl+o to expand)
+
+● Stop Task
+  ⎿  Backend stats patterns · stopped
+
+● Agent "Backend stats patterns" was stopped by Claude
+
+  Thought for 1s (ctrl+o to expand)
+
+● Explore(Explore UI and stats locations)  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+● Stop Task
+  ⎿  Explore UI and stats locations · stopped
+
+● Agent "Explore UI and stats locations" was stopped by Claude
+
+  Thought for 1s (ctrl+o to expand)
+
+● Explore(Explore stats popup implementation)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+● Explore(Locate files for statistics popup)
+  ⎿  Initializing…
+  ⎿  Error: Cannot create agent worktree: not in a git repository and no 
+     WorktreeCreate hooks are configured. Configure 
+     WorktreeCreate/WorktreeRemove hooks in settings.json to use worktree 
+     isolation with other VCS systems.
+
+  Thought for 1s (ctrl+o to expand)
+  ⎿  Message queued for delivery to ae3ec0142ead507db at its next tool 
+     round.
+
+  Thought for 1s, read 1 file (ctrl+o to expand)
+
+  Thought for 1s, searched for 1 pattern, read 11 files, listed 1 directory (ctrl+o to expand)
+
+● Explore(Targeted UI+backend scan)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+
+● Stop Task
+  ⎿  Explore stats popup implementation · stopped
+
+● Agent "Explore stats popup implementation" was stopped by Claude
+
+● Stop Task
+  ⎿  Targeted UI+backend scan · stopped
+
+● Agent "Targeted UI+backend scan" was stopped by Claude
+
+  Thought for 1s (ctrl+o to expand)
+
+● Plan(Design stats popup plan)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Thought for 1s (ctrl+o to expand)
+● Stop Task
+  ⎿  Design stats popup plan · stopped
+
+● Agent "Design stats popup plan" was stopped by Claude
+
+  Thought for 1s, read 1 file (ctrl+o to expand)
+
+● Updated plan
+  ⎿  /plan to preview
+  ⎿  User rejected Claude's plan:
+     ╭─────────────────────────────────────────────────────────────────────────╮
+     │ Plan: popup "Статистика" for operator UI                                │
+     │                                                                         │
+     │ Context                                                                 │
+     │                                                                         │
+     │ The operator screen currently shows the queue and chat but no aggregate │
+     │ KPIs. You asked for a dedicated popup opened by a bottom-left button    │
+     │ labeled «Статистика» to quickly view:                                   │
+     │ 1. how many requests the bot closed itself,                             │
+     │ 2. how many were forwarded to operators,                                │
+     │ 3. average operator response time.                                      │
+     │                                                                         │
+     │ This should be implemented in the existing Inertia flow so stats stay   │
+     │ in sync with regular reloads.                                           │
+     │                                                                         │
+     │ Recommended implementation                                              │
+     │                                                                         │
+     │ 1) Add stats payload in backend page props                              │
+     │                                                                         │
+     │ File: app/Http/Controllers/SupportRequestController.php                 │
+     │                                                                         │
+     │ - Extend render() to pass a new lazy prop, e.g. stats:                  │
+     │   - 'stats' => fn () => $this->stats(),                                 │
+     │ - Add a private stats() method that computes all metrics from requests  │
+     │   table:                                                                │
+     │   - bot_closed_count: count where forwarded_to_operator = false and     │
+     │     status = 'closed'.                                                  │
+     │   - forwarded_count: count where forwarded_to_operator = true.          │
+     │   - avg_operator_response_seconds: average of (closed_at -              │
+     │     forwarded_at) only for rows where:                                  │
+     │     - forwarded_to_operator = true                                      │
+     │     - forwarded_at IS NOT NULL                                          │
+     │     - closed_at IS NOT NULL                                             │
+     │     - closed_at >= forwarded_at                                         │
+     │ - Compute average duration with a PostgreSQL-safe expression using      │
+     │   epoch diff, then format in PHP:                                       │
+     │   - seconds → total integer (rounded)                                   │
+     │   - hours = intdiv(seconds, 3600)                                       │
+     │   - minutes = intdiv(seconds % 3600, 60)                                │
+     │   - string format: "%02d часов %02d минут"                              │
+     │ - Provide a null-safe fallback when no rows match, e.g. "00 часов 00    │
+     │   минут".                                                               │
+     │                                                                         │
+     │ 2) Keep frontend types aligned                                          │
+     │                                                                         │
+     │ File: resources/js/types/support.ts                                     │
+     │                                                                         │
+     │ - Add a new exported type, e.g. SupportStats with fields:               │
+     │   - bot_closed_count: number                                            │
+     │   - forwarded_count: number                                             │
+     │   - avg_operator_response_time: string                                  │
+     │                                                                         │
+     │ 3) Add stats popup + bottom-left button in Requests page                │
+     │                                                                         │
+     │ File: resources/js/pages/Requests/Index.vue                             │
+     │                                                                         │
+     │ - Extend page props to include stats: SupportStats.                     │
+     │ - Add local UI state for popup visibility (const statsOpen =            │
+     │   ref(false)), with open/close handlers.                                │
+     │ - Add a fixed button in the left-bottom corner of viewport:             │
+     │   - Tailwind positioning near fixed left-4 bottom-4                     │
+     │   - label exactly Статистика                                            │
+     │ - Add a modal/popup panel (no existing shared modal component in        │
+     │   codebase, so inline structure in this page):                          │
+     │   - backdrop overlay (fixed inset-0 ...) + centered card                │
+     │   - heading Статистика                                                  │
+     │   - three rows with labels and values from props.stats                  │
+     │ - Add UX basics consistent with current style:                          │
+     │   - close button (Закрыть or ×)                                         │
+     │   - close on backdrop click                                             │
+     │   - optional Esc-key close (if simple and local)                        │
+     │                                                                         │
+     │ 4) Ensure live updates refresh stats too                                │
+     │                                                                         │
+     │ File: resources/js/pages/Requests/Index.vue                             │
+     │                                                                         │
+     │ - In refresh() change Inertia reload only list from ['requests',        │
+     │   'selected'] to:                                                       │
+     │   - ['requests', 'selected', 'stats']                                   │
+     │     So the popup values update during realtime events.                  │
+     │                                                                         │
+     │ 5) Extend feature tests for new props and duration formatting           │
+     │                                                                         │
+     │ File: tests/Feature/SupportRequestUiTest.php                            │
+     │                                                                         │
+     │ Add/extend tests to verify:                                             │
+     │ - stats prop is present on home render and has expected keys.           │
+     │ - bot_closed_count counts only status=closed +                          │
+     │   forwarded_to_operator=false.                                          │
+     │ - forwarded_count counts all forwarded_to_operator=true regardless of   │
+     │   status.                                                               │
+     │ - average response time uses only forwarded+closed requests and ignores │
+     │   invalid/null intervals.                                               │
+     │ - formatted output matches requested shape (NN часов NN минут).         │
+     │                                                                         │
+     │ Use fixed timestamps via now()->sub... or explicit datetime strings to  │
+     │ create deterministic averages.                                          │
+     │                                                                         │
+     │ Critical files to modify                                                │
+     │                                                                         │
+     │ - app/Http/Controllers/SupportRequestController.php                     │
+     │ - resources/js/types/support.ts                                         │
+     │ - resources/js/pages/Requests/Index.vue                                 │
+     │ - tests/Feature/SupportRequestUiTest.php                                │
+     │                                                                         │
+     │ Reuse and consistency notes                                             │
+     │                                                                         │
+     │ - Reuse existing Inertia render path in                                 │
+     │   SupportRequestController::render().                                   │
+     │ - Reuse existing Tailwind visual language from Requests/Index.vue       │
+     │   (borders, rounded cards, gray/blue palette).                          │
+     │ - Keep route structure unchanged; stats are page props, not a new       │
+     │   endpoint.                                                             │
+     │                                                                         │
+     │ Verification                                                            │
+     │                                                                         │
+     │ 1. Run backend tests (at least targeted):                               │
+     │    - php artisan test tests/Feature/SupportRequestUiTest.php            │
+     │ 2. Run full suite to ensure no regressions:                             │
+     │    - php artisan test                                                   │
+     │ 3. Manual UI check in running app:                                      │
+     │    - open operator page                                                 │
+     │    - confirm Статистика button appears in bottom-left                   │
+     │    - open popup and verify the 3 metrics display                        │
+     │    - create/close/forward scenarios and verify numbers update after     │
+     │      realtime refresh                                                   │
+     ╰─────────────────────────────────────────────────────────────────────────╯
+
+✻ Sautéed for 7m 16s · done 14:12
+
+❯ don't make auto-sync. It can be calculated when operator clicks on it with    
+  simple SQL/ORM queries                                                        
+
+  Thought for 1s (ctrl+o to expand)
+
+● Updated plan
+  ⎿  /plan to preview
+
+● User approved Claude's plan
+  ⎿  Plan saved to: ~/.claude/plans/cheeky-sniffing-blanket.md · /plan to edit
+     Plan: popup "Статистика" for operator UI (on-demand)
+
+     Context
+
+     You want a dedicated popup with a bottom-left button «Статистика» in the
+     operator UI. Metrics should be calculated only when the operator clicks the
+     button (no auto-sync/realtime background refresh of stats).
+
+     Required values:
+     1. bot-closed count: forwarded_to_operator = false AND status = 'closed'
+     2. forwarded count: forwarded_to_operator = true
+     3. average operator response time: AVG(closed_at - forwarded_at) formatted
+        as %H часов %M минут.
+
+     Recommended implementation
+
+     1) Add a dedicated on-demand stats endpoint
+
+     Files:
+     - app/Http/Controllers/SupportRequestController.php
+     - routes/web.php
+     - Add stats() action to SupportRequestController returning JsonResponse.
+     - Register auth-only route, e.g. GET /requests/stats with name like
+       requests.stats.
+     - In stats() run simple ORM/SQL-backed aggregations against requests:
+       - bot_closed_count: count where forwarded_to_operator=false and
+         status='closed'
+       - forwarded_count: count where forwarded_to_operator=true
+       - average seconds from (closed_at - forwarded_at) for rows with:
+         - forwarded_to_operator=true
+         - forwarded_at IS NOT NULL
+         - closed_at IS NOT NULL
+         - closed_at >= forwarded_at
+     - Format average duration in PHP as two-digit hours/minutes:
+       - NN часов NN минут
+       - if no valid rows: 00 часов 00 минут
+
+     2) Keep initial Inertia page lightweight
+
+     File: app/Http/Controllers/SupportRequestController.php
+
+     - Do not add stats to default render() props.
+     - Keep existing page payload (requests, selected) unchanged for regular
+       page/realtime behavior.
+
+     3) Add popup + button in Requests page
+
+     File: resources/js/pages/Requests/Index.vue
+
+     - Add bottom-left fixed button labeled «Статистика» (fixed left-4 
+       bottom-4).
+     - Add popup/modal UI in the same file (no shared modal currently exists):
+       - backdrop + card
+       - title Статистика
+       - three metric rows
+       - close button and backdrop-close
+     - Add local reactive state:
+       - statsOpen boolean
+       - statsLoading boolean
+       - statsError string|null
+       - stats object|null
+     - On button click:
+       - open popup
+       - fetch /requests/stats (simple request)
+       - render loading state, then values
+       - show error fallback if request fails
+
+     4) Add/extend frontend typings
+
+     File: resources/js/types/support.ts
+
+     - Add a type for fetched stats payload, e.g.:
+       - bot_closed_count: number
+       - forwarded_count: number
+       - avg_operator_response_time: string
+
+     Tests
+
+     File: tests/Feature/SupportRequestUiTest.php
+
+     Add tests for new endpoint behavior:
+     - guest cannot access stats route (redirect to login)
+     - authenticated operator can access stats route and receives JSON structure
+     - bot_closed_count uses exact filter (closed + not forwarded)
+     - forwarded_count counts all forwarded
+     - average response time excludes rows with null/invalid timestamps
+     - formatted value matches pattern NN часов NN минут
+
+     (Frontend popup behavior can be visually verified manually; current test
+     stack is backend-focused.)
+
+     Critical files to modify
+
+     - app/Http/Controllers/SupportRequestController.php
+     - routes/web.php
+     - resources/js/pages/Requests/Index.vue
+     - resources/js/types/support.ts
+     - tests/Feature/SupportRequestUiTest.php
+
+     Verification
+
+     1. Run targeted tests:
+        - php artisan test tests/Feature/SupportRequestUiTest.php
+     2. Run full suite:
+        - php artisan test
+     3. Manual UI check:
+        - verify bottom-left Статистика button
+        - click button → popup opens and loads stats on demand
+        - verify values/format
+        - confirm no automatic stats refresh unless button is clicked again
+
+  Thought for 1s, read 1 file (ctrl+o to expand)
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 5 lines
+       7  use App\Models\Message;
+       8  use App\Models\SupportRequest;
+       9  use App\Services\SupportRequestService;
+      10 +use Illuminate\Http\JsonResponse;                              
+      11  use Illuminate\Http\RedirectResponse;
+      12  use Illuminate\Http\Request;
+      13  use Inertia\Inertia;
+      14  use Inertia\Response;
+      15  
+      16 +use function max;                                              
+      17 +use function round;                                            
+      18 +use function sprintf;                                          
+      19 +                                                               
+      20  class SupportRequestController extends Controller
+      21  {
+      22      public function index(): Response
+
+  Thought for 1s, read 1 file (ctrl+o to expand)
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 26 lines
+      47          return to_route('home');
+      48      }
+      49  
+      50 +    public function stats(): JsonResponse                      
+      51 +    {                                                          
+      52 +        $botClosedCount = SupportRequest::query()              
+      53 +            ->where('status', RequestStatus::Closed->value)    
+      54 +            ->where('forwarded_to_operator', false)            
+      55 +            ->count();                                         
+      56 +                                                               
+      57 +        $forwardedCount = SupportRequest::query()              
+      58 +            ->where('forwarded_to_operator', true)             
+      59 +            ->count();                                         
+      60 +                                                               
+      61 +        $avgSeconds = (float) (SupportRequest::query()         
+      62 +            ->where('forwarded_to_operator', true)             
+      63 +            ->whereNotNull('forwarded_at')                     
+      64 +            ->whereNotNull('closed_at')                        
+      65 +            ->whereColumn('closed_at', '>=', 'forwarded_at')   
+      66 +            ->selectRaw('AVG(EXTRACT(EPOCH FROM (closed_at - fo
+         +rwarded_at))) as avg_seconds')                                 
+      67 +            ->value('avg_seconds') ?? 0);                      
+      68 +                                                               
+      69 +        return response()->json([                              
+      70 +            'bot_closed_count' => $botClosedCount,             
+      71 +            'forwarded_count' => $forwardedCount,              
+      72 +            'avg_operator_response_time' => $this->formatDurati
+         +on($avgSeconds),                                               
+      73 +        ]);                                                    
+      74 +    }                                                          
+      75 +                                                               
+      76      private function render(?SupportRequest $selected): Respons
+          e
+      77      {
+      78          return Inertia::render('Requests/Index', [
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 9 lines
+      139              'created_at' => $message->created_at,
+      140          ];
+      141      }
+      142 +                                                              
+      143 +    private function formatDuration(float $seconds): string   
+      144 +    {                                                         
+      145 +        $totalSeconds = max(0, (int) round($seconds));        
+      146 +        $hours = intdiv($totalSeconds, 3600);                 
+      147 +        $minutes = intdiv($totalSeconds % 3600, 60);          
+      148 +                                                              
+      149 +        return sprintf('%02d часов %02d минут', $hours, $minut
+          +es);                                                          
+      150 +    }                                                         
+      151  }
+
+● Update(routes/web.php)
+  ⎿  Added 1 line
+      19      Route::get('/messages/{message}/image', [MediaController::c
+          lass, 'image'])->name('messages.image');
+      20      Route::get('/messages/{message}/file', [MediaController::cl
+          ass, 'file'])->name('messages.file');
+      21      Route::post('/requests/{supportRequest}/close', [SupportReq
+          uestController::class, 'close'])->name('requests.close');
+      22 +    Route::get('/requests/stats', [SupportRequestController::cl
+         +ass, 'stats'])->name('requests.stats');                        
+      23  });
+
+● Update(resources/js/types/support.ts)
+  ⎿  Added 6 lines
+      29      messages: ChatMessage[];
+      30  };
+      31  
+      32 +export type SupportStats = {                                   
+      33 +    bot_closed_count: number;                                  
+      34 +    forwarded_count: number;                                   
+      35 +    avg_operator_response_time: string;                        
+      36 +};                                                             
+      37 +                                                               
+      38  export type ReverbConfig = {
+      39      key: string | null;
+      40      host: string;
+
+  Thought for 1s (ctrl+o to expand)
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 1 line
+      12      QueueItem,
+      13      ReverbConfig,
+      14      SelectedRequest,
+      15 +    SupportStats,                                              
+      16  } from '@/types';
+      17  
+      18  const props = defineProps<{
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 5 lines
+      27  const messagesEl = ref<HTMLElement | null>(null);
+      28  const connection = ref<'connecting' | 'live' | 'offline'>('conn
+          ecting');
+      29  
+      30 +const statsOpen = ref(false);                                  
+      31 +const statsLoading = ref(false);                               
+      32 +const statsError = ref<string | null>(null);                   
+      33 +const stats = ref<SupportStats | null>(null);                  
+      34 +                                                               
+      35  const operatorName = computed(() => page.props.auth.operator?.n
+          ame);
+      36  
+      37  function logout(): void {
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 28 lines
+       80      router.post(close.url(props.selected.id));
+       81  }
+       82  
+       83 +async function openStats(): Promise<void> {                   
+       84 +    statsOpen.value = true;                                   
+       85 +    statsLoading.value = true;                                
+       86 +    statsError.value = null;                                  
+       87 +                                                              
+       88 +    try {                                                     
+       89 +        const response = await fetch('/requests/stats', {     
+       90 +            headers: { Accept: 'application/json' },          
+       91 +            credentials: 'same-origin',                       
+       92 +        });                                                   
+       93 +                                                              
+       94 +        if (!response.ok) {                                   
+       95 +            throw new Error('bad-status');                    
+       96 +        }                                                     
+       97 +                                                              
+       98 +        const payload = (await response.json()) as SupportStat
+          +s;                                                            
+       99 +        stats.value = payload;                                
+      100 +    } catch {                                                 
+      101 +        statsError.value = 'Не удалось загрузить статистику.';
+      102 +    } finally {                                               
+      103 +        statsLoading.value = false;                           
+      104 +    }                                                         
+      105 +}                                                             
+      106 +                                                              
+      107 +function closeStats(): void {                                 
+      108 +    statsOpen.value = false;                                  
+      109 +}                                                             
+      110 +                                                              
+      111  function scrollToBottom(): void {
+      112      void nextTick(() => {
+      113          if (messagesEl.value) {
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 1 line, removed 1 line
+      183  <template>
+      184      <Head title="Обращения" />
+      185  
+      186 -    <div class="flex h-screen bg-gray-50 text-gray-900">      
+      186 +    <div class="relative flex h-screen bg-gray-50 text-gray-90
+          +0">                                                           
+      187          <aside class="flex w-80 shrink-0 flex-col border-r bor
+           der-gray-200 bg-white">
+      188              <header class="border-b border-gray-200 p-4">
+      189                  <div class="flex items-center justify-between"
+           >
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 45 lines
+      369                  </p>
+      370              </template>
+      371          </main>
+      372 +                                                              
+      373 +        <button                                               
+      374 +            type="button"                                     
+      375 +            class="fixed bottom-4 left-4 z-20 rounded-md borde
+          +r border-gray-300 bg-white px-4 py-2 text-sm font-medium text-
+          +gray-800 shadow hover:bg-gray-50"                             
+      376 +            @click="openStats"                                
+      377 +        >                                                     
+      378 +            Статистика                                        
+      379 +        </button>                                             
+      380 +                                                              
+      381 +        <div                                                  
+      382 +            v-if="statsOpen"                                  
+      383 +            class="fixed inset-0 z-30 flex items-center justif
+          +y-center bg-black/40 p-4"                                     
+      384 +            @click.self="closeStats"                          
+      385 +        >                                                     
+      386 +            <div class="w-full max-w-md rounded-lg bg-white p-
+          +5 shadow-lg">                                                 
+      387 +                <div class="mb-4 flex items-center justify-bet
+          +ween">                                                        
+      388 +                    <h3 class="text-lg font-semibold">Статисти
+          +ка</h3>                                                       
+      389 +                    <button                                   
+      390 +                        type="button"                         
+      391 +                        class="rounded px-2 py-1 text-sm text-
+          +gray-500 hover:bg-gray-100 hover:text-gray-800"               
+      392 +                        @click="closeStats"                   
+      393 +                    >                                         
+      394 +                        ✕                                     
+      395 +                    </button>                                 
+      396 +                </div>                                        
+      397 +                                                              
+      398 +                <p v-if="statsLoading" class="text-sm text-gra
+          +y-500">Загрузка…</p>                                          
+      399 +                <p v-else-if="statsError" class="text-sm text-
+          +red-600">{{ statsError }}</p>                                 
+      400 +                                                              
+      401 +                <dl v-else-if="stats" class="space-y-3 text-sm
+          +">                                                            
+      402 +                    <div class="flex items-center justify-betw
+          +een gap-4 border-b border-gray-100 pb-2">                     
+      403 +                        <dt class="text-gray-600">Закрыто бото
+          +м</dt>                                                        
+      404 +                        <dd class="font-semibold text-gray-900
+          +">{{ stats.bot_closed_count }}</dd>                           
+      405 +                    </div>                                    
+      406 +                    <div class="flex items-center justify-betw
+          +een gap-4 border-b border-gray-100 pb-2">                     
+      407 +                        <dt class="text-gray-600">Передано опе
+          +раторам</dt>                                                  
+      408 +                        <dd class="font-semibold text-gray-900
+          +">{{ stats.forwarded_count }}</dd>                            
+      409 +                    </div>                                    
+      410 +                    <div class="flex items-center justify-betw
+          +een gap-4">                                                   
+      411 +                        <dt class="text-gray-600">Среднее врем
+          +я ответа оператора</dt>                                       
+      412 +                        <dd class="text-right font-semibold te
+          +xt-gray-900">{{ stats.avg_operator_response_time }}</dd>      
+      413 +                    </div>                                    
+      414 +                </dl>                                         
+      415 +            </div>                                            
+      416 +        </div>                                                
+      417      </div>
+      418  </template>
+
+  Thought for 1s, read 2 files (ctrl+o to expand)
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 3 lines, removed 2 lines
+      63              ->whereNotNull('forwarded_at')
+      64              ->whereNotNull('closed_at')
+      65              ->whereColumn('closed_at', '>=', 'forwarded_at')
+      66 -            ->selectRaw('AVG(EXTRACT(EPOCH FROM (closed_at - fo
+         -rwarded_at))) as avg_seconds')                                 
+      67 -            ->value('avg_seconds') ?? 0);                      
+      66 +            ->get(['forwarded_at', 'closed_at'])               
+      67 +            ->map(fn (SupportRequest $request): int => $request
+         +->closed_at->diffInSeconds($request->forwarded_at))            
+      68 +            ->avg() ?? 0);                                     
+      69  
+      70          return response()->json([
+      71              'bot_closed_count' => $botClosedCount,
+
+  Thought for 1s (ctrl+o to expand)
+
+● Update(tests/Feature/AuthTest.php)
+  ⎿  Added 1 line
+      11  
+      12      $this->get(route('home'))->assertRedirect(route('login'));
+      13      $this->get(route('requests.show', $request))->assertRedirec
+          t(route('login'));
+      14 +    $this->get(route('requests.stats'))->assertRedirect(route('
+         +login'));                                                      
+      15      $this->post(route('requests.messages.store', $request), ['t
+          ext' => 'x'])->assertRedirect(route('login'));
+      16      $this->post(route('requests.close', $request))->assertRedir
+          ect(route('login'));
+      17  });
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 73 lines
+      139      $this->get(route('home'))->assertInertia(fn (Assert $page)
+            => $page->has('requests', 0));
+      140  });
+      141  
+      142 +it('returns operator statistics as JSON on demand', function (
+          +) {                                                           
+      143 +    SupportRequest::create([                                  
+      144 +        'user_id' => 10,                                      
+      145 +        'status' => RequestStatus::Closed,                    
+      146 +        'forwarded_to_operator' => false,                     
+      147 +    ]);                                                       
+      148 +                                                              
+      149 +    SupportRequest::create([                                  
+      150 +        'user_id' => 11,                                      
+      151 +        'status' => RequestStatus::Open,                      
+      152 +        'forwarded_to_operator' => true,                      
+      153 +        'forwarded_at' => now()->subMinutes(90),              
+      154 +        'closed_at' => null,                                  
+      155 +    ]);                                                       
+      156 +                                                              
+      157 +    SupportRequest::create([                                  
+      158 +        'user_id' => 12,                                      
+      159 +        'status' => RequestStatus::Closed,                    
+      160 +        'forwarded_to_operator' => true,                      
+      161 +        'forwarded_at' => now()->subMinutes(40),              
+      162 +        'closed_at' => now()->subMinutes(10),                 
+      163 +    ]);                                                       
+      164 +                                                              
+      165 +    SupportRequest::create([                                  
+      166 +        'user_id' => 13,                                      
+      167 +        'status' => RequestStatus::Closed,                    
+      168 +        'forwarded_to_operator' => true,                      
+      169 +        'forwarded_at' => now()->subMinutes(20),              
+      170 +        'closed_at' => now()->subMinutes(5),                  
+      171 +    ]);                                                       
+      172 +                                                              
+      173 +    // Invalid interval: should be excluded from average.     
+      174 +    SupportRequest::create([                                  
+      175 +        'user_id' => 14,                                      
+      176 +        'status' => RequestStatus::Closed,                    
+      177 +        'forwarded_to_operator' => true,                      
+      178 +        'forwarded_at' => now()->subMinutes(5),               
+      179 +        'closed_at' => now()->subMinutes(10),                 
+      180 +    ]);                                                       
+      181 +                                                              
+      182 +    $this->get(route('requests.stats'))                       
+      183 +        ->assertOk()                                          
+      184 +        ->assertJson([                                        
+      185 +            'bot_closed_count' => 1,                          
+      186 +            'forwarded_count' => 4,                           
+      187 +            'avg_operator_response_time' => '00 часов 20 минут
+          +',                                                            
+      188 +        ]);                                                   
+      189 +});                                                           
+      190 +                                                              
+      191 +it('returns zeroed average when there are no forwarded-and-clo
+          +sed requests', function () {                                  
+      192 +    SupportRequest::create([                                  
+      193 +        'user_id' => 1,                                       
+      194 +        'status' => RequestStatus::Closed,                    
+      195 +        'forwarded_to_operator' => false,                     
+      196 +    ]);                                                       
+      197 +                                                              
+      198 +    SupportRequest::create([                                  
+      199 +        'user_id' => 2,                                       
+      200 +        'status' => RequestStatus::Open,                      
+      201 +        'forwarded_to_operator' => true,                      
+      202 +        'forwarded_at' => now()->subMinutes(3),               
+      203 +        'closed_at' => null,                                  
+      204 +    ]);                                                       
+      205 +                                                              
+      206 +    $this->get(route('requests.stats'))                       
+      207 +        ->assertOk()                                          
+      208 +        ->assertJson([                                        
+      209 +            'bot_closed_count' => 1,                          
+      210 +            'forwarded_count' => 1,                           
+      211 +            'avg_operator_response_time' => '00 часов 00 минут
+          +',                                                            
+      212 +        ]);                                                   
+      213 +});                                                           
+      214 +                                                              
+      215  it('broadcasts on the support-requests channel', function () {
+      216      $event = new SupportRequestUpdated(5);
+      217  
+
+  Thought for 1s, searched for 1 pattern (ctrl+o to expand)
+
+● Update(routes/web.php)
+  ⎿  Added 1 line, removed 1 line
+      14      Route::post('/logout', [AuthController::class, 'destroy'])-
+          >name('logout');
+      15  
+      16      Route::get('/', [SupportRequestController::class, 'index'])
+          ->name('home');
+      17 +    Route::get('/requests/stats', [SupportRequestController::cl
+         +ass, 'stats'])->name('requests.stats');                        
+      18      Route::get('/requests/{supportRequest}', [SupportRequestCon
+          troller::class, 'show'])->name('requests.show');
+      19      Route::post('/requests/{supportRequest}/messages', [Support
+          RequestController::class, 'storeMessage'])->name('requests.mess
+          ages.store');
+      20      Route::get('/messages/{message}/image', [MediaController::c
+          lass, 'image'])->name('messages.image');
+      21      Route::get('/messages/{message}/file', [MediaController::cl
+          ass, 'file'])->name('messages.file');
+      22      Route::post('/requests/{supportRequest}/close', [SupportReq
+          uestController::class, 'close'])->name('requests.close');
+      22 -    Route::get('/requests/stats', [SupportRequestController::cl
+         -ass, 'stats'])->name('requests.stats');                        
+      23  });
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 1 line
+       4  import {
+       5      close,
+       6      show,
+       7 +    stats as statsRoute,                                       
+       8      storeMessage,
+       9  } from '@/actions/App/Http/Controllers/SupportRequestController
+          ';
+      10  import { getEcho } from '@/lib/echo';
+
+● Update(resources/js/pages/Requests/Index.vue)
+  ⎿  Added 1 line, removed 1 line
+      87      statsError.value = null;
+      88  
+      89      try {
+      90 -        const response = await fetch('/requests/stats', {      
+      90 +        const response = await fetch(statsRoute.url(), {       
+      91              headers: { Accept: 'application/json' },
+      92              credentials: 'same-origin',
+      93          });
+
+  Thought for 1s, ran 2 shell commands (ctrl+o to expand)
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 1 line, removed 1 line
+      62              ->where('forwarded_to_operator', true)
+      63              ->whereNotNull('forwarded_at')
+      64              ->whereNotNull('closed_at')
+      65 -            ->whereColumn('closed_at', '>=', 'forwarded_at')   
+      65              ->get(['forwarded_at', 'closed_at'])
+      66 +            ->filter(fn (SupportRequest $request): bool => $req
+         +uest->closed_at->greaterThanOrEqualTo($request->forwarded_at)) 
+      67              ->map(fn (SupportRequest $request): int => $request
+          ->closed_at->diffInSeconds($request->forwarded_at))
+      68              ->avg() ?? 0);
+      69  
+
+  Thought for 1s, read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 1 line
+      10  use Illuminate\Http\JsonResponse;
+      11  use Illuminate\Http\RedirectResponse;
+      12  use Illuminate\Http\Request;
+      13 +use Illuminate\Support\Facades\DB;                             
+      14  use Inertia\Inertia;
+      15  use Inertia\Response;
+      16  
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 3 lines, removed 4 lines
+      63              ->where('forwarded_to_operator', true)
+      64              ->whereNotNull('forwarded_at')
+      65              ->whereNotNull('closed_at')
+      66 -            ->get(['forwarded_at', 'closed_at'])               
+      67 -            ->filter(fn (SupportRequest $request): bool => $req
+         -uest->closed_at->greaterThanOrEqualTo($request->forwarded_at)) 
+      68 -            ->map(fn (SupportRequest $request): int => $request
+         -->closed_at->diffInSeconds($request->forwarded_at))            
+      69 -            ->avg() ?? 0);                                     
+      66 +            ->whereColumn('closed_at', '>=', 'forwarded_at')   
+      67 +            ->selectRaw($this->avgDurationSecondsSql().' as avg
+         +_seconds')                                                     
+      68 +            ->value('avg_seconds') ?? 0);                      
+      69  
+      70          return response()->json([
+      71              'bot_closed_count' => $botClosedCount,
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 8 lines
+      149  
+      150          return sprintf('%02d часов %02d минут', $hours, $minut
+           es);
+      151      }
+      152 +                                                              
+      153 +    private function avgDurationSecondsSql(): string          
+      154 +    {                                                         
+      155 +        return match (DB::getDriverName()) {                  
+      156 +            'sqlite' => "AVG((julianday(closed_at) - julianday
+          +(forwarded_at)) * 86400)",                                    
+      157 +            default => 'AVG(EXTRACT(EPOCH FROM (closed_at - fo
+          +rwarded_at)))',                                               
+      158 +        };                                                    
+      159 +    }                                                         
+      160  }
+
+  Thought for 1s, read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 9 lines, removed 7 lines
+      140  });
+      141  
+      142  it('returns operator statistics as JSON on demand', function (
+           ) {
+      143 +    $base = now();                                            
+      144 +                                                              
+      145      SupportRequest::create([
+      146          'user_id' => 10,
+      147          'status' => RequestStatus::Closed,
+     ...
+      152          'user_id' => 11,
+      153          'status' => RequestStatus::Open,
+      154          'forwarded_to_operator' => true,
+      153 -        'forwarded_at' => now()->subMinutes(90),              
+      155 +        'forwarded_at' => $base->copy()->subMinutes(90),      
+      156          'closed_at' => null,
+      157      ]);
+      158  
+     ...
+      160          'user_id' => 12,
+      161          'status' => RequestStatus::Closed,
+      162          'forwarded_to_operator' => true,
+      161 -        'forwarded_at' => now()->subMinutes(40),              
+      162 -        'closed_at' => now()->subMinutes(10),                 
+      163 +        'forwarded_at' => $base->copy()->subMinutes(40),      
+      164 +        'closed_at' => $base->copy()->subMinutes(10),         
+      165      ]);
+      166  
+      167      SupportRequest::create([
+      168          'user_id' => 13,
+      169          'status' => RequestStatus::Closed,
+      170          'forwarded_to_operator' => true,
+      169 -        'forwarded_at' => now()->subMinutes(20),              
+      170 -        'closed_at' => now()->subMinutes(5),                  
+      171 +        'forwarded_at' => $base->copy()->subMinutes(20),      
+      172 +        'closed_at' => $base->copy()->subMinutes(10),         
+      173      ]);
+      174  
+      175      // Invalid interval: should be excluded from average.
+     ...
+      177          'user_id' => 14,
+      178          'status' => RequestStatus::Closed,
+      179          'forwarded_to_operator' => true,
+      178 -        'forwarded_at' => now()->subMinutes(5),               
+      179 -        'closed_at' => now()->subMinutes(10),                 
+      180 +        'forwarded_at' => $base->copy()->subMinutes(5),       
+      181 +        'closed_at' => $base->copy()->subMinutes(10),         
+      182      ]);
+      183  
+      184      $this->get(route('requests.stats'))
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 3 lines, removed 1 line
+      191  });
+      192  
+      193  it('returns zeroed average when there are no forwarded-and-clo
+           sed requests', function () {
+      194 +    $base = now();                                            
+      195 +                                                              
+      196      SupportRequest::create([
+      197          'user_id' => 1,
+      198          'status' => RequestStatus::Closed,
+     ...
+      203          'user_id' => 2,
+      204          'status' => RequestStatus::Open,
+      205          'forwarded_to_operator' => true,
+      204 -        'forwarded_at' => now()->subMinutes(3),               
+      206 +        'forwarded_at' => $base->copy()->subMinutes(3),       
+      207          'closed_at' => null,
+      208      ]);
+      209  
+
+  Thought for 1s, read 6 files, ran 4 shell commands (ctrl+o to expand)
+
+● Great call — done without auto-sync.
+  Stats are now computed only when the operator clicks «Статистика».
+
+  What I changed
+
+  - Added on-demand backend endpoint:
+    - GET /requests/stats in routes/web.php:17
+    - Controller action stats() in
+      app/Http/Controllers/SupportRequestController.php:50
+  - Endpoint returns:
+    - bot_closed_count (forwarded_to_operator=false and status='closed')
+    - forwarded_count (forwarded_to_operator=true)
+    - avg_operator_response_time formatted as NN часов NN минут
+  - Average response calculation:
+    - Uses DB-specific SQL for portability:
+      - SQLite (tests): julianday(...)
+      - PostgreSQL: EXTRACT(EPOCH FROM (...))
+    - Implemented in avgDurationSecondsSql() at SupportRequestController.php:152
+    - Formatting in formatDuration() at SupportRequestController.php:143
+
+  UI changes
+
+  - Added bottom-left fixed button «Статистика» in:
+    - resources/js/pages/Requests/Index.vue:373
+  - Added popup/modal in same file:
+    - opens on click
+    - fetches stats on demand via fetch(statsRoute.url())
+    - shows loading / error states
+  - No realtime stats reload added (as requested).
+  - Added SupportStats type:
+    - resources/js/types/support.ts:32
+  - Used generated Wayfinder action:
+    - statsRoute import in Index.vue:6
+    - regenerated actions via php artisan wayfinder:generate
+
+  Tests updated
+
+  - Guest access check for stats route:
+    - tests/Feature/AuthTest.php:13
+  - Stats endpoint behavior tests:
+    - tests/Feature/SupportRequestUiTest.php:142
+    - tests/Feature/SupportRequestUiTest.php:193
+
+  Verification run
+
+  - php artisan test tests/Feature/AuthTest.php 
+    tests/Feature/SupportRequestUiTest.php ✅
+  - php artisan test ✅ (53 passed)
+
+  If you want, next I can add a tiny “Обновить” button inside the popup so
+  operators can refresh stats while it stays open (still on-demand, no
+  auto-sync).
+
+✻ Cooked for 8m 7s · done 14:21
+
+※ recap: Goal: add an on-demand “Статистика” popup in the operator UI; current task is complete with backend endpoint, bottom-left button, popup fetch logic, and tests passing. Next action: run the app and quickly verify popup behavior visually. (disable recaps in /config)
+
+❯ I realized there is an issue with time calculation, it should calculate       
+  average time which operator spends on first message. I suggest using query    
+  like this:                                                                    
+  $avgSeconds = (float) (                                                       
+      SupportRequest::query()                                                   
+          ->where('forwarded_to_operator', true)                                
+          ->whereNotNull('forwarded_at')                                        
+          ->joinSub(                                                            
+              Message::query()                                                  
+                  ->select('request_id')                                        
+                  ->selectRaw('MIN(created_at) as first_operator_message_at')   
+                  ->where('sender_type', 'operator')                            
+                  ->groupBy('request_id'),                                      
+              'first_operator_message',                                         
+              'first_operator_message.request_id',                              
+              '=',                                                              
+              'requests.request_id'                                             
+          )                                                                     
+          ->whereColumn(                                                        
+              'first_operator_message.first_operator_message_at',               
+              '>=',                                                             
+              'requests.forwarded_at'                                           
+          )                                                                     
+          ->selectRaw(                                                          
+              'AVG(EXTRACT(EPOCH FROM (                                         
+                  first_operator_message.first_operator_message_at -            
+  requests.forwarded_at                                                         
+              ))) as avg_seconds'                                               
+          )                                                                     
+          ->value('avg_seconds')                                                
+      ?? 0                                                                      
+  );                                                                            
+
+  Thought for 1s, read 1 file (ctrl+o to expand)
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 16 lines, removed 3 lines
+      62          $avgSeconds = (float) (SupportRequest::query()
+      63              ->where('forwarded_to_operator', true)
+      64              ->whereNotNull('forwarded_at')
+      65 -            ->whereNotNull('closed_at')                        
+      66 -            ->whereColumn('closed_at', '>=', 'forwarded_at')   
+      67 -            ->selectRaw($this->avgDurationSecondsSql().' as avg
+         -_seconds')                                                     
+      65 +            ->joinSub(                                         
+      66 +                Message::query()                               
+      67 +                    ->select('request_id')                     
+      68 +                    ->selectRaw('MIN(created_at) as first_opera
+         +tor_message_at')                                               
+      69 +                    ->where('sender_type', 'operator')         
+      70 +                    ->groupBy('request_id'),                   
+      71 +                'first_operator_message',                      
+      72 +                'first_operator_message.request_id',           
+      73 +                '=',                                           
+      74 +                'requests.request_id',                         
+      75 +            )                                                  
+      76 +            ->whereColumn('first_operator_message.first_operato
+         +r_message_at', '>=', 'requests.forwarded_at')                  
+      77 +            ->selectRaw($this->avgDurationSecondsSql(          
+      78 +                'first_operator_message.first_operator_message_
+         +at',                                                           
+      79 +                'requests.forwarded_at',                       
+      80 +            ).' as avg_seconds')                               
+      81              ->value('avg_seconds') ?? 0);
+      82  
+      83          return response()->json([
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 3 lines, removed 3 lines
+      163          return sprintf('%02d часов %02d минут', $hours, $minut
+           es);
+      164      }
+      165  
+      166 -    private function avgDurationSecondsSql(): string          
+      166 +    private function avgDurationSecondsSql(string $to, string 
+          +$from): string                                                
+      167      {
+      168          return match (DB::getDriverName()) {
+      169 -            'sqlite' => 'AVG((julianday(closed_at) - julianday
+          -(forwarded_at)) * 86400)',                                    
+      170 -            default => 'AVG(EXTRACT(EPOCH FROM (closed_at - fo
+          -rwarded_at)))',                                               
+      169 +            'sqlite' => sprintf('AVG((julianday(%s) - julianda
+          +y(%s)) * 86400)', $to, $from),                                
+      170 +            default => sprintf('AVG(EXTRACT(EPOCH FROM (%s - %
+          +s)))', $to, $from),                                           
+      171          };
+      172      }
+      173  }
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 50 lines, removed 8 lines
+      148          'forwarded_to_operator' => false,
+      149      ]);
+      150  
+      151 -    SupportRequest::create([                                  
+      151 +    $r1 = SupportRequest::create([                            
+      152          'user_id' => 11,
+      153          'status' => RequestStatus::Open,
+      154          'forwarded_to_operator' => true,
+     ...
+      156          'closed_at' => null,
+      157      ]);
+      158  
+      159 -    SupportRequest::create([                                  
+      159 +    $r2 = SupportRequest::create([                            
+      160          'user_id' => 12,
+      161          'status' => RequestStatus::Closed,
+      162          'forwarded_to_operator' => true,
+     ...
+      164          'closed_at' => $base->copy()->subMinutes(10),
+      165      ]);
+      166  
+      167 -    SupportRequest::create([                                  
+      167 +    $r3 = SupportRequest::create([                            
+      168          'user_id' => 13,
+      169          'status' => RequestStatus::Closed,
+      170          'forwarded_to_operator' => true,
+     ...
+      172          'closed_at' => $base->copy()->subMinutes(10),
+      173      ]);
+      174  
+      175 -    // Invalid interval: should be excluded from average.     
+      176 -    SupportRequest::create([                                  
+      175 +    // Invalid interval: operator message before forwarding, s
+          +hould be excluded from average.                               
+      176 +    $r4 = SupportRequest::create([                            
+      177          'user_id' => 14,
+      178          'status' => RequestStatus::Closed,
+      179          'forwarded_to_operator' => true,
+      180          'forwarded_at' => $base->copy()->subMinutes(5),
+      181 -        'closed_at' => $base->copy()->subMinutes(10),         
+      181 +        'closed_at' => $base->copy()->subMinutes(1),          
+      182      ]);
+      183  
+      184 +    // Forwarded request without operator message: should be e
+          +xcluded from average.                                         
+      185 +    SupportRequest::create([                                  
+      186 +        'user_id' => 15,                                      
+      187 +        'status' => RequestStatus::Closed,                    
+      188 +        'forwarded_to_operator' => true,                      
+      189 +        'forwarded_at' => $base->copy()->subMinutes(50),      
+      190 +        'closed_at' => $base->copy()->subMinutes(30),         
+      191 +    ]);                                                       
+      192 +                                                              
+      193 +    $r2->messages()->create([                                 
+      194 +        'telegram_message_id' => 5001,                        
+      195 +        'sender_type' => SenderType::Operator,                
+      196 +        'operator_id' => $this->operator->operator_id,        
+      197 +        'text' => 'Первый ответ',                             
+      198 +        'created_at' => $base->copy()->subMinutes(20),        
+      199 +    ]);                                                       
+      200 +                                                              
+      201 +    // Later operator message must not affect average (only th
+          +e first one counts).                                          
+      202 +    $r2->messages()->create([                                 
+      203 +        'telegram_message_id' => 5002,                        
+      204 +        'sender_type' => SenderType::Operator,                
+      205 +        'operator_id' => $this->operator->operator_id,        
+      206 +        'text' => 'Второй ответ',                             
+      207 +        'created_at' => $base->copy()->subMinutes(15),        
+      208 +    ]);                                                       
+      209 +                                                              
+      210 +    $r3->messages()->create([                                 
+      211 +        'telegram_message_id' => 5003,                        
+      212 +        'sender_type' => SenderType::Operator,                
+      213 +        'operator_id' => $this->operator->operator_id,        
+      214 +        'text' => 'Ответ',                                    
+      215 +        'created_at' => $base->copy()->subMinutes(15),        
+      216 +    ]);                                                       
+      217 +                                                              
+      218 +    $r4->messages()->create([                                 
+      219 +        'telegram_message_id' => 5004,                        
+      220 +        'sender_type' => SenderType::Operator,                
+      221 +        'operator_id' => $this->operator->operator_id,        
+      222 +        'text' => 'Слишком рано',                             
+      223 +        'created_at' => $base->copy()->subMinutes(6),         
+      224 +    ]);                                                       
+      225 +                                                              
+      226      $this->get(route('requests.stats'))
+      227          ->assertOk()
+      228          ->assertJson([
+      229              'bot_closed_count' => 1,
+      188 -            'forwarded_count' => 4,                           
+      189 -            'avg_operator_response_time' => '00 часов 20 минут
+          -',                                                            
+      230 +            'forwarded_count' => 5,                           
+      231 +            'avg_operator_response_time' => '00 часов 12 минут
+          +',                                                            
+      232          ]);
+      233  });
+      234  
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 11 lines, removed 2 lines
+      232          ]);
+      233  });
+      234  
+      235 -it('returns zeroed average when there are no forwarded-and-clo
+          -sed requests', function () {                                  
+      235 +it('returns zeroed average when there are no valid forwarded-t
+          +o-first-operator-message intervals', function () {            
+      236      $base = now();
+      237  
+      238      SupportRequest::create([
+     ...
+      241          'forwarded_to_operator' => false,
+      242      ]);
+      243  
+      244 -    SupportRequest::create([                                  
+      244 +    $invalid = SupportRequest::create([                       
+      245          'user_id' => 2,
+      246          'status' => RequestStatus::Open,
+      247          'forwarded_to_operator' => true,
+     ...
+      249          'closed_at' => null,
+      250      ]);
+      251  
+      252 +    // Operator message before forwarding: excluded by whereCo
+          +lumn check.                                                   
+      253 +    $invalid->messages()->create([                            
+      254 +        'telegram_message_id' => 7001,                        
+      255 +        'sender_type' => SenderType::Operator,                
+      256 +        'operator_id' => $this->operator->operator_id,        
+      257 +        'text' => 'Ранний ответ',                             
+      258 +        'created_at' => $base->copy()->subMinutes(4),         
+      259 +    ]);                                                       
+      260 +                                                              
+      261      $this->get(route('requests.stats'))
+      262          ->assertOk()
+      263          ->assertJson([
+
+  Read 2 files, ran 3 shell commands (ctrl+o to expand)
+
+● Excellent catch — you're right, average should be based on first operator 
+  message after forwarding, not closed_at.
+
+  I implemented this logic exactly in that direction.
+
+  Updated logic
+
+  In app/Http/Controllers/SupportRequestController.php:51:
+  - Keeps:
+    - bot_closed_count
+    - forwarded_count
+  - Replaced average calculation with:
+    - joinSub(...) on messages grouped by request_id
+    - MIN(created_at) for sender_type = 'operator' as first operator reply
+    - filter first_operator_message_at >= requests.forwarded_at
+    - average in seconds between first_operator_message_at and forwarded_at
+    - format as NN часов NN минут
+
+  Key section: SupportRequestController.php:62-81.
+
+  ---
+
+  Tests updated for new meaning
+
+  In tests/Feature/SupportRequestUiTest.php:142:
+  - Added scenarios for:
+    - first operator message counted
+    - later operator message ignored
+    - forwarded request with no operator message excluded from average
+    - operator message before forwarding excluded
+  - Expected average now matches first-reply timing logic (00 часов 12 минут).
+
+  Also updated zero-case test in tests/Feature/SupportRequestUiTest.php:235 to
+  align with first-reply rules.
+
+  ---
+
+  Verification
+
+  - php artisan test tests/Feature/SupportRequestUiTest.php ✅
+  - php artisan test ✅ (53 passed)
+
+  If you want, I can also rename the popup label text from
+  Среднее время ответа оператора to something explicit like
+  Среднее время до первого ответа оператора so operators interpret it correctly.
+
+✻ Worked for 1m 43s · done 14:36
+※ recap: Goal: add an on-demand “Статистика” popup for operators with correct metrics. I’ve already switched average-time logic to first operator reply after forwarding and all tests pass; next action is your quick UI wording preference for that metric label. (disable recaps in /config)
+
+❯ I have a problem, time is showing as "00 ч 00 м" always, I suspect problem is 
+  with PostgreSQL specificially. You can give me SQL queries so I could test    
+  how it works myself. If tests are working I suspect problem is not with code  
+  itself.                                                                       
+  promo_support=# SELECT * FROM requests;                                       
+   request_id |  user_id   | status | forwarded_to_operator |     created_at    
+    |    forwarded_at     |      closed_at                                      
+  ------------+------------+--------+-----------------------+------------------ 
+  ---+---------------------+---------------------                               
+            1 | 1271275468 | closed | t                     | 2026-10-01        
+  11:41:36 | 2026-10-01 11:41:37 | 2026-10-01 11:42:20                          
+            2 | 1271275468 | open   | t                     | 2026-10-01        
+  11:42:31 | 2026-10-01 11:43:03 |                                              
+  (2 rows)                                                                      
+                                                                                
+  promo_support=# SELECT * FROM messages;                                       
+   message_id | request_id |  user_id   | telegram_message_id | sender_type |   
+                                                             text               
+                                                  |     created_at      |       
+  operator_id | message_type | image_path | file_id | file_name                 
+  ------------+------------+------------+---------------------+-------------+-- 
+  ----------------------------------------------------------------------------- 
+  -------------------------------------------------+---------------------+----- 
+  --------+--------------+------------+---------+-----------                    
+            1 |          1 | 1271275468 |                  58 | user        |   
+  сайт не работает, помогите                                                    
+                                                   | 2026-10-01 11:41:36 |      
+          | text         |            |         |                               
+            2 |          1 |            |                  59 | bot         |   
+  Здравствуйте! Ваше сообщение направлено оператору, подождите пожалуйста.      
+  Время работы операторов с 9:00 до 18:00 в будние дни. | 2026-10-01 11:41:37 | 
+              | text         |            |         |                           
+            3 |          1 |            |                  60 | operator    |   
+  Здравствуйте, подскажите пожалуйста в чём проблема                            
+                                                   | 2026-10-01 11:41:57 |      
+        1 | text         |            |         |                               
+            4 |          1 | 1271275468 |                  61 | user        | д 
+  ви...                                                                         
+                                                  | 2026-10-01 11:42:06 |       
+         | text         |            |         |                                
+            5 |          1 |            |                  62 | operator    |   
+  понятно                                                                       
+                                                   | 2026-10-01 11:42:17 |      
+        1 | text         |            |         |                               
+            6 |          2 | 1271275468 |                  63 | user        |   
+  абабабаб                                                                      
+                                                   | 2026-10-01 11:42:31 |      
+          | text         |            |         |                               
+            7 |          2 |            |                  64 | bot         |   
+  Здравствуйте! Опишите ваш вопрос, буду рад помочь!                            
+                                                   | 2026-10-01 11:42:32 |      
+          | text         |            |         |                               
+            8 |          2 | 1271275468 |                  65 | user        | У 
+  меня кефир от вашей компании просроченный, хочу вернуть деньги                
+                                                  | 2026-10-01 11:43:01 |       
+         | text         |            |         |                                
+            9 |          2 |            |                  66 | bot         |   
+  Здравствуйте! Ваше сообщение направлено оператору, подождите пожалуйста.      
+  Время работы операторов с 9:00 до 18:00 в будние дни. | 2026-10-01 11:43:03 | 
+              | text         |            |         |                           
+           10 |          2 |            |                  67 | operator    |   
+  Что слуиэ                                                                     
+                                                   | 2026-10-01 11:43:16 |      
+        1 | text         |            |         |                               
+  (10 rows)                                                                     
+
+  Thought for 1s (ctrl+o to expand)
+
+● Good suspicion — but from the data you pasted, PostgreSQL is probably working 
+  correctly.
+
+  Why you see 00 ч 00 м
+
+  For your sample:
+
+  - request 1: 11:41:57 - 11:41:37 = 20 sec
+  - request 2: 11:43:16 - 11:43:03 = 13 sec
+  - average = (20 + 13) / 2 = 16.5 sec
+
+  Your UI currently formats only hours + minutes (no seconds), so 16.5 sec
+  becomes 00 ч 00 м.
+
+  ---
+
+  Run these SQL checks directly in psql:
+
+  -- 1) Bot-closed count
+  SELECT COUNT(*) AS bot_closed_count
+  FROM requests
+  WHERE status = 'closed'
+    AND forwarded_to_operator = false;
+
+  -- 2) Forwarded count
+  SELECT COUNT(*) AS forwarded_count
+  FROM requests
+  WHERE forwarded_to_operator = true;
+
+  -- 3) Per-request first operator response time in seconds
+  WITH first_operator_message AS (
+      SELECT request_id, MIN(created_at) AS first_operator_message_at
+      FROM messages
+      WHERE sender_type = 'operator'
+      GROUP BY request_id
+  )
+  SELECT
+      r.request_id,
+      r.forwarded_at,
+      f.first_operator_message_at,
+      EXTRACT(EPOCH FROM (f.first_operator_message_at - r.forwarded_at)) AS
+  response_seconds
+  FROM requests r
+  JOIN first_operator_message f ON f.request_id = r.request_id
+  WHERE r.forwarded_to_operator = true
+    AND r.forwarded_at IS NOT NULL
+    AND f.first_operator_message_at >= r.forwarded_at
+  ORDER BY r.request_id;
+
+  -- 4) Average response in raw seconds (this is the key truth metric)
+  WITH first_operator_message AS (
+      SELECT request_id, MIN(created_at) AS first_operator_message_at
+      FROM messages
+      WHERE sender_type = 'operator'
+      GROUP BY request_id
+  )
+  SELECT
+      AVG(EXTRACT(EPOCH FROM (f.first_operator_message_at - r.forwarded_at))) AS
+  avg_seconds
+  FROM requests r
+  JOIN first_operator_message f ON f.request_id = r.request_id
+  WHERE r.forwarded_to_operator = true
+    AND r.forwarded_at IS NOT NULL
+    AND f.first_operator_message_at >= r.forwarded_at;
+
+  -- 5) Emulate current UI formatting (HH + MM only)
+  WITH first_operator_message AS (
+      SELECT request_id, MIN(created_at) AS first_operator_message_at
+      FROM messages
+      WHERE sender_type = 'operator'
+      GROUP BY request_id
+  ),
+  avg_data AS (
+      SELECT COALESCE(
+          AVG(EXTRACT(EPOCH FROM (f.first_operator_message_at -
+  r.forwarded_at))),
+          0
+      ) AS avg_seconds
+      FROM requests r
+      JOIN first_operator_message f ON f.request_id = r.request_id
+      WHERE r.forwarded_to_operator = true
+        AND r.forwarded_at IS NOT NULL
+        AND f.first_operator_message_at >= r.forwarded_at
+  )
+  SELECT
+      avg_seconds,
+      LPAD(((ROUND(avg_seconds)::int / 3600))::text, 2, '0') || ' ч ' ||
+      LPAD((((ROUND(avg_seconds)::int % 3600) / 60))::text, 2, '0') || ' м' AS
+  hh_mm
+  FROM avg_data;
+
+  ---
+
+  If query #4 returns ~16.5, then code is fine and formatting is the reason.
+  If you want, I can change display to include seconds (e.g. 00 ч 00 м 17 с) or
+  show минуты with decimals.
+
+✻ Cooked for 25s · done 14:54
+
+❯ Yes, everything works correctly. Then I would ask you to also format second   
+  in output: %H ч %M м %S с                                                     
+
+  Thought for 1s (ctrl+o to expand)
+
+● Update(app/Http/Controllers/SupportRequestController.php)
+  ⎿  Added 2 lines, removed 1 line
+      159          $totalSeconds = max(0, (int) round($seconds));
+      160          $hours = intdiv($totalSeconds, 3600);
+      161          $minutes = intdiv($totalSeconds % 3600, 60);
+      162 +        $secs = $totalSeconds % 60;                           
+      163  
+      163 -        return sprintf('%02d часов %02d минут', $hours, $minut
+          -es);                                                          
+      164 +        return sprintf('%02d ч %02d м %02d с', $hours, $minute
+          +s, $secs);                                                    
+      165      }
+      166  
+      167      private function avgDurationSecondsSql(string $to, string 
+           $from): string
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 1 line, removed 1 line
+      228          ->assertJson([
+      229              'bot_closed_count' => 1,
+      230              'forwarded_count' => 5,
+      231 -            'avg_operator_response_time' => '00 часов 12 минут
+          -',                                                            
+      231 +            'avg_operator_response_time' => '00 ч 12 м 30 с', 
+      232          ]);
+      233  });
+      234  
+
+● Update(tests/Feature/SupportRequestUiTest.php)
+  ⎿  Added 1 line, removed 1 line
+      263          ->assertJson([
+      264              'bot_closed_count' => 1,
+      265              'forwarded_count' => 1,
+      266 -            'avg_operator_response_time' => '00 часов 00 минут
+          -',                                                            
+      266 +            'avg_operator_response_time' => '00 ч 00 м 00 с', 
+      267          ]);
+      268  });
+      269  
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Done ✅
+
+  I changed the average response formatting to include seconds:
+
+  - New format: %H ч %M м %S с
+  - Example: 00 ч 12 м 30 с
+
+  Updated
+
+  - app/Http/Controllers/SupportRequestController.php
+    formatDuration() now returns '%02d ч %02d м %02d с'.
+
+  Tests updated
+
+  - tests/Feature/SupportRequestUiTest.php
+    - expected '00 ч 12 м 30 с' for the average case
+    - expected '00 ч 00 м 00 с' for zero case
+
+  Verification
+
+  - Targeted test: SupportRequestUiTest ✅
+  - Full suite: 53 passed ✅
+
+✻ Cogitated for 44s · done 14:56

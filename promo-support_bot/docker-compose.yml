@@ -1,0 +1,84 @@
+x-app: &app
+  build: .
+  image: promo-support-app
+  # Rebuild on every `docker compose up` (layers are cached) so a service never runs a stale image.
+  pull_policy: build
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    # Log to `docker compose logs` instead of a file inside the container.
+    LOG_CHANNEL: stderr
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: 5432
+    # Server-side address of Reverb inside the compose network.
+    REVERB_HOST: reverb
+    REVERB_PORT: 8080
+    REVERB_SCHEME: http
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: applies migrations and seeds the initial operator before anything else starts.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["sh", "-c", "php artisan migrate --force && php artisan db:seed --force"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  reverb:
+    <<: *app
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+    ports:
+      - "${REVERB_PUBLIC_PORT:-8080}:8080"
+
+  web:
+    <<: *app
+    command: ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000", "--no-reload"]
+    environment:
+      LOG_CHANNEL: stderr
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REVERB_HOST: reverb
+      REVERB_PORT: 8080
+      REVERB_SCHEME: http
+      PHP_CLI_SERVER_WORKERS: 4
+    volumes:
+      # Shared with `bot`: it downloads photos, the web app serves them to operators.
+      - storage-private:/app/storage/app/private
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  bot:
+    <<: *app
+    volumes:
+      - storage-private:/app/storage/app/private
+    command: ["php", "artisan", "telegram:poll"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      reverb:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  storage-private:
