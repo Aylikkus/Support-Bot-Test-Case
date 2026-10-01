@@ -13,9 +13,13 @@ docker compose up
 
 Относительно корня репозитория
 
+
 Системный промпт и правила акции: `promo-support_bot/resources/prompts`
+
 CLAUDE.md: `promo-support_bot/CLAUDE.md`
+
 Прогон по тестовым случаям: `requests_answers.md`
+
 Экспорты сессий: `exports`
 
 # Допущения
